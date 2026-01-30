@@ -2,15 +2,28 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
-
 const INITIAL_BALANCE = parseFloat(process.env.INITIAL_BALANCE) || 1500;
+
+let pool = null;
+
+if (process.env.DATABASE_URL) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+} else {
+  console.error('⚠️  DATABASE_URL is not set!');
+  console.error('👉 In Railway: click "+ New" → "Database" → "PostgreSQL"');
+}
 
 export const db = {
   async init() {
+    if (!pool) {
+      console.error('❌ Cannot initialize: DATABASE_URL not configured');
+      console.error('👉 Add PostgreSQL in Railway, then redeploy');
+      return;
+    }
+    
     const client = await pool.connect();
     try {
       await client.query(`
@@ -66,17 +79,20 @@ export const db = {
         VALUES (1, ${INITIAL_BALANCE}, ${INITIAL_BALANCE}) 
         ON CONFLICT (id) DO NOTHING;
       `);
+      console.log('✅ Database initialized');
     } finally {
       client.release();
     }
   },
 
   async getAccount() {
+    if (!pool) return { balance: INITIAL_BALANCE, initial_balance: INITIAL_BALANCE };
     const { rows } = await pool.query('SELECT * FROM account WHERE id = 1');
     return rows[0] || { balance: INITIAL_BALANCE, initial_balance: INITIAL_BALANCE };
   },
 
   async updateBalance(newBalance) {
+    if (!pool) return;
     await pool.query(
       'UPDATE account SET balance = $1, updated_at = NOW() WHERE id = 1',
       [newBalance]
@@ -84,6 +100,7 @@ export const db = {
   },
 
   async getPositions() {
+    if (!pool) return [];
     const { rows } = await pool.query(
       'SELECT * FROM positions ORDER BY created_at DESC'
     );
@@ -91,6 +108,7 @@ export const db = {
   },
 
   async getPosition(marketId, outcome) {
+    if (!pool) return null;
     const { rows } = await pool.query(
       'SELECT * FROM positions WHERE market_id = $1 AND outcome = $2',
       [marketId, outcome]
@@ -99,6 +117,7 @@ export const db = {
   },
 
   async upsertPosition(position) {
+    if (!pool) return;
     const existing = await this.getPosition(position.market_id, position.outcome);
     
     if (existing) {
@@ -120,6 +139,7 @@ export const db = {
   },
 
   async deletePosition(marketId, outcome) {
+    if (!pool) return;
     await pool.query(
       'DELETE FROM positions WHERE market_id = $1 AND outcome = $2',
       [marketId, outcome]
@@ -127,6 +147,7 @@ export const db = {
   },
 
   async updatePositionPrice(marketId, outcome, currentPrice) {
+    if (!pool) return;
     await pool.query(
       'UPDATE positions SET current_price = $1, updated_at = NOW() WHERE market_id = $2 AND outcome = $3',
       [currentPrice, marketId, outcome]
@@ -134,6 +155,7 @@ export const db = {
   },
 
   async getTrades(limit = 50) {
+    if (!pool) return [];
     const { rows } = await pool.query(
       'SELECT * FROM trades ORDER BY created_at DESC LIMIT $1',
       [limit]
@@ -142,6 +164,7 @@ export const db = {
   },
 
   async addTrade(trade) {
+    if (!pool) return null;
     const { rows } = await pool.query(`
       INSERT INTO trades (market_id, market_slug, market_title, outcome, action, shares, price, total, pnl, reasoning)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -155,6 +178,7 @@ export const db = {
   },
 
   async getThoughts(limit = 20) {
+    if (!pool) return [];
     const { rows } = await pool.query(
       'SELECT * FROM thoughts ORDER BY created_at DESC LIMIT $1',
       [limit]
@@ -163,6 +187,7 @@ export const db = {
   },
 
   async addThought(tradeId, content) {
+    if (!pool) return;
     const { rows: trades } = await pool.query(
       'SELECT market_title, action, outcome FROM trades WHERE id = $1',
       [tradeId]
@@ -178,7 +203,12 @@ export const db = {
   async getStats() {
     const account = await this.getAccount();
     const positions = await this.getPositions();
-    const { rows: trades } = await pool.query('SELECT * FROM trades');
+    
+    let trades = [];
+    if (pool) {
+      const result = await pool.query('SELECT * FROM trades');
+      trades = result.rows;
+    }
 
     const completedTrades = trades.filter(t => t.action === 'SELL');
     const wins = completedTrades.filter(t => parseFloat(t.pnl || 0) > 0).length;
